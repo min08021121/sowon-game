@@ -61,16 +61,16 @@ const parse = v => (typeof v === 'string' ? (() => { try { return JSON.parse(v);
 
 // 순위표 스냅숏(공개용: 실명 제외)을 다시 만들어 board:<게임> 에 저장
 export async function rebuildBoard(r, game) {
-  const z = await r.zrange('lb:' + game, 0, 99, { rev: true, withScores: true });
+  const z = await r.zrange('sowon:lb:' + game, 0, 99, { rev: true, withScores: true });
   const ids = [], scores = [];
   for (let i = 0; i < z.length; i += 2) { ids.push(String(z[i])); scores.push(Number(z[i + 1])); }
   let recs = {};
-  if (ids.length) recs = (await r.hmget('rec:' + game, ...ids)) || {};
+  if (ids.length) recs = (await r.hmget('sowon:rec:' + game, ...ids)) || {};
   const list = ids.map((id, i) => {
     const rec = parse(recs[id]) || {};
     return { id, nick: rec.nick || '-', score: scores[i], at: rec.at || 0 };
   });
-  await r.set('board:' + game, JSON.stringify(list));
+  await r.set('sowon:board:' + game, JSON.stringify(list));
   return list;
 }
 export { parse };

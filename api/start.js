@@ -9,7 +9,7 @@ export default async function handler(req, res) {
   if (!GAMES[game]) return res.status(400).json({ error: 'game' });
   try {
     const r = await redis();
-    if (await limited(r, 'rl:start:' + ipOf(req), 60, 60)) return res.status(429).json({ error: 'rate' });
+    if (await limited(r, 'sowon:rl:start:' + ipOf(req), 60, 60)) return res.status(429).json({ error: 'rate' });
     res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json({ token: sign({ g: game, t: Date.now(), n: crypto.randomUUID() }) });
   } catch (e) {
