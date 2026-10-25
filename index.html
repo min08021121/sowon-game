@@ -236,24 +236,6 @@ canvas { display: block; touch-action: none; border-radius: 12px; }
 
 </head>
 <body>
-<!-- ===== 설정: 아래 두 곳만 본인 값으로 바꾸세요 ===== -->
-<script>
-  // Firebase 콘솔 > 프로젝트 설정 > 내 앱(웹)에서 복사한 값
-  window.FIREBASE_CONFIG = {
-    apiKey: "여기에_apiKey",
-    authDomain: "여기에_authDomain",
-    projectId: "여기에_projectId",
-    storageBucket: "여기에_storageBucket",
-    messagingSenderId: "여기에_messagingSenderId",
-    appId: "여기에_appId"
-  };
-  // 관리자 계정 이메일 (화면에는 안 보이고, 관리자는 비밀번호만 입력해요. 보안 규칙과 같은 이메일)
-  window.ADMIN_EMAIL = "admin@example.com";
-</script>
-<!-- ===== 설정 끝 ===== -->
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <div class="wrap">
   <header>
     <h1>소원 <span class="hl">이벤트 게임</span></h1>
@@ -370,94 +352,71 @@ canvas { display: block; touch-action: none; border-radius: 12px; }
   const IDS = Object.keys(GAMES);
   const hintOf = id => (TOUCH ? GAMES[id].mobile : GAMES[id].pc)[0];
 
-  // ---------- 저장소 (Firebase Firestore) ----------
-  let db = null, auth = null, isAdmin = false, showReal = false, mode = 'loading', canWrite = true;
+  // ---------- 저장소 (Vercel API) ----------
+  let isAdmin = false, adminPw = '', showReal = false;
   const records = { knife: [], runner: [], stack: [] };
   const realNames = { knife: {}, runner: {}, stack: {} };
-  let privUnsubs = [];
   const $ = id => document.getElementById(id);
-
   const normName = s => s.replace(/\s+/g, ' ').trim();
-  async function keyOf(name) {
-    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('sowon-event:' + name));
-    return 'p' + Array.from(new Uint8Array(buf)).slice(0, 16).map(b => b.toString(16).padStart(2, '0')).join('');
-  }
   const sortRecs = list => list.slice().sort((a, b) => (b.score - a.score) || ((a.at || 0) - (b.at || 0)));
   function showNotice(text) { const n = $('notice'); n.textContent = text; n.hidden = !text; }
 
-  function initStore() {
-    const cfg = window.FIREBASE_CONFIG || {};
-    try {
-      if (!window.firebase || !cfg.apiKey || cfg.apiKey.indexOf('여기에') === 0) throw new Error('config');
-      firebase.initializeApp(cfg);
-      db = firebase.firestore(); auth = firebase.auth();
-      auth.setPersistence(firebase.auth.Auth.Persistence.SESSION).catch(() => {});
-    } catch (e) {
-      mode = 'off';
-      showNotice('Firebase 설정값이 아직 들어 있지 않아 기록이 저장되지 않아요. index.html 위쪽의 설정값을 채워 주세요.');
-      renderAll(); return;
-    }
-    mode = 'db';
-    for (const id of IDS) {
-      db.collection('scores_' + id).orderBy('score', 'desc').limit(100).onSnapshot(snap => {
-        records[id] = sortRecs(snap.docs.map(d => ({ key: d.id, ...d.data() })).filter(r => typeof r.score === 'number'));
-        renderAll();
-      }, () => showNotice('순위를 불러오지 못했어요. 인터넷 연결을 확인하고 새로고침해 주세요.'));
-    }
-    auth.onAuthStateChanged(u => {
-      const adminEmail = String(window.ADMIN_EMAIL || '').toLowerCase();
-      if (u && (u.email || '').toLowerCase() !== adminEmail) { auth.signOut(); showNotice('관리자 계정이 아니에요.'); return; }
-      isAdmin = !!u;
-      privUnsubs.forEach(f => f()); privUnsubs = [];
-      for (const id of IDS) realNames[id] = {};
-      if (isAdmin) {
-        for (const id of IDS) {
-          privUnsubs.push(db.collection('private_' + id).onSnapshot(snap => {
-            const m = {}; snap.docs.forEach(d => { m[d.id] = d.data(); }); realNames[id] = m; renderAll();
-          }, () => showNotice('실명 목록을 불러오지 못했어요. 보안 규칙의 관리자 이메일을 확인해 주세요.')));
-        }
-      } else { showReal = false; }
-      $('realToggle').hidden = !isAdmin;
-      $('realToggle').setAttribute('aria-pressed', String(showReal));
-      $('realToggle').textContent = showReal ? '실명 숨기기' : '실명 보기 (관리자)';
-      $('adminBtn').textContent = isAdmin ? '관리자 로그아웃' : '관리자 로그인';
-      renderAll();
-    });
+  async function api(path, body) {
+    const opt = body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {};
+    const r = await fetch(path, opt);
+    let j = {}; try { j = await r.json(); } catch {}
+    if (!r.ok) { const e = new Error(j.error || 'error'); e.code = j.error || 'http_' + r.status; throw e; }
+    return j;
   }
+  function applyBoard(all) {
+    for (const id of IDS) if (Array.isArray(all[id])) records[id] = sortRecs(all[id].map(r => ({ key: r.id, ...r })));
+  }
+  async function refresh() {
+    try {
+      applyBoard(await api('/api/scores'));
+      if (isAdmin) await loadAdmin();
+      showNotice(''); renderAll();
+    } catch { showNotice('순위를 불러오지 못했어요. 인터넷 연결을 확인해 주세요.'); }
+  }
+  async function loadAdmin() {
+    const all = await api('/api/admin', { password: adminPw, action: 'list' });
+    for (const id of IDS) { const m = {}; (all[id] || []).forEach(r => { m[r.id] = r; }); realNames[id] = m; }
+  }
+  function initStore() {
+    refresh();
+    setInterval(() => { if (!document.hidden && $('game').hidden) refresh(); }, 15000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden && $('game').hidden) refresh(); });
+  }
+  function getToken(id) { return api('/api/start', { game: id }).then(j => j.token).catch(() => null); }
 
-  async function saveScore(id, p, score) {
-    if (mode !== 'db') return { ok: false, code: 'off' };
-    const key = await keyOf(p.name);
-    const pub = db.collection('scores_' + id).doc(key), priv = db.collection('private_' + id).doc(key);
-    const at = Date.now();
+  async function saveScore(id, p, score, tokenP) {
+    const token = await tokenP;
+    if (!token) return { ok: false, code: 'token' };
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const s = await pub.get();
-        const prev = s.exists ? s.data() : null;
-        if (!prev || score > prev.score) {
-          const batch = db.batch();
-          batch.set(pub, { nick: p.nick, score, at });
-          batch.set(priv, { name: p.name, nick: p.nick, score, at });
-          await batch.commit();
-          return { ok: true, best: true, prev: prev ? prev.score : null, key };
-        }
-        return { ok: true, best: false, prev: prev.score, key };
+        const j = await api('/api/scores', { game: id, name: p.name, nick: p.nick, score, token });
+        if (Array.isArray(j.board)) { records[id] = sortRecs(j.board.map(r => ({ key: r.id, ...r }))); renderAll(); }
+        return { ok: true, best: j.best, prev: j.prev, key: j.id, rank: j.rank, topScore: j.topScore };
       } catch (e) {
-        if (attempt === 0) { await new Promise(r => setTimeout(r, 500 + Math.random() * 700)); continue; }
-        return { ok: false, code: e && e.code, key };
+        if (e.code === 'server' && attempt === 0) { await new Promise(r => setTimeout(r, 700)); continue; }
+        return { ok: false, code: e.code };
       }
     }
-    return { ok: false, key };
+    return { ok: false };
   }
 
   async function deleteRec(id, key) {
     if (!isAdmin) return;
-    try {
-      const batch = db.batch();
-      batch.delete(db.collection('scores_' + id).doc(key));
-      batch.delete(db.collection('private_' + id).doc(key));
-      await batch.commit();
-    } catch { showNotice('기록을 삭제하지 못했어요.'); }
+    try { await api('/api/admin', { password: adminPw, action: 'delete', game: id, id: key }); await refresh(); }
+    catch { showNotice('기록을 삭제하지 못했어요.'); }
+  }
+  function setAdmin(on) {
+    isAdmin = on; if (!on) { adminPw = ''; showReal = false; for (const id of IDS) realNames[id] = {}; }
+    $('realToggle').hidden = !isAdmin;
+    $('realToggle').setAttribute('aria-pressed', String(showReal));
+    $('realToggle').textContent = showReal ? '실명 숨기기' : '실명 보기 (관리자)';
+    $('adminBtn').textContent = isAdmin ? '관리자 로그아웃' : '관리자 로그인';
+    renderAll();
   }
 
   // ---------- 화면 ----------
@@ -598,7 +557,7 @@ canvas { display: block; touch-action: none; border-radius: 12px; }
     unlockScreen();
   }
   $('gQuit').addEventListener('click', quitGame);
-  $('oHome').addEventListener('click', quitGame);
+  $('oHome').addEventListener('click', () => { quitGame(); refresh(); });
   $('oRetry').addEventListener('click', () => startGame(cur.id));
 
   function loop(ts) {
@@ -624,7 +583,7 @@ canvas { display: block; touch-action: none; border-radius: 12px; }
     ctx.fillText(hintOf(cur.id), W / 2, H / 2 + 22);
     if (!TOUCH) ctx.fillText('(스페이스 키로도 시작)', W / 2, H / 2 + 44);
   }
-  function begin() { if (cur && cur.phase === 'ready') { cur.phase = 'play'; cur.acc = 0; cur.g.start && cur.g.start(); return true; } return false; }
+  function begin() { if (cur && cur.phase === 'ready') { cur.phase = 'play'; cur.acc = 0; cur.tokenP = getToken(cur.id); cur.g.start && cur.g.start(); return true; } return false; }
 
   async function finish() {
     const id = cur.id, g = GAMES[id];
@@ -637,19 +596,16 @@ canvas { display: block; touch-action: none; border-radius: 12px; }
     $('oMsg').textContent = '기록 저장 중…'; $('oMsg').className = 'res-msg'; $('oSub').textContent = '';
     setTimeout(() => { if (cur && cur.phase === 'over') $('over').hidden = false; }, 450);
     if (!(score >= 0 && score <= g.max)) { $('oMsg').textContent = '기록이 올바르지 않아 저장하지 않았어요.'; return; }
-    const res = await saveScore(id, player, score);
+    const res = await saveScore(id, player, score, cur.tokenP);
     if (!cur || cur.phase !== 'over') return;
     if (!res.ok) {
-      $('oMsg').textContent = res.code === 'off' ? 'Firebase 설정 전이라 기록이 저장되지 않아요.' : '기록을 저장하지 못했어요. 인터넷 연결을 확인해 주세요.';
+      $('oMsg').textContent = res.code === 'too_fast' || res.code === 'token' || res.code === 'token_used' ? '기록을 확인할 수 없어 저장하지 않았어요.' : res.code === 'rate' ? '너무 자주 저장했어요. 잠시 후 다시 해 주세요.' : '기록을 저장하지 못했어요. 인터넷 연결을 확인해 주세요.';
       return;
     }
-    const best = res.best ? score : res.prev;
-    const list = records[id];
-    let rank = 1; for (const r of list) { if (r.score > best && r.key !== res.key) rank++; }
+    const rank = res.rank || 1;
     if (res.best) { $('oMsg').textContent = res.prev == null ? '첫 기록이 저장됐어요!' : '개인 최고 기록 갱신!'; $('oMsg').classList.add('best'); }
     else $('oMsg').textContent = '개인 최고 기록은 ' + g.fmt(res.prev) + g.unit + '이에요.';
-    const top = list.find(r => r.key !== res.key);
-    $('oSub').textContent = '현재 ' + rank + '위' + (rank === 1 ? ' · 이 분야 1등이에요!' : (top ? ' · 1등 ' + g.fmt(top.score) + g.unit : ''));
+    $('oSub').textContent = '현재 ' + rank + '위' + (rank === 1 ? ' · 이 분야 1등이에요!' : (res.topScore != null ? ' · 1등 ' + g.fmt(res.topScore) + g.unit : ''));
   }
 
   // 입력 (게임 영역 어디를 눌러도 동작)
@@ -1029,17 +985,20 @@ canvas { display: block; touch-action: none; border-radius: 12px; }
   }
 
   $('adminBtn').addEventListener('click', () => {
-    if (!auth) { showNotice('Firebase 설정값을 먼저 채워 주세요.'); return; }
-    if (auth.currentUser) { auth.signOut(); return; }
+    if (isAdmin) { setAdmin(false); return; }
     $('adminErr').textContent = ''; $('adPw').value = ''; $('adminModal').hidden = false; setTimeout(() => $('adPw').focus(), 30);
   });
   $('adminCancel').addEventListener('click', () => { $('adminModal').hidden = true; });
   $('adminForm').addEventListener('submit', async e => {
     e.preventDefault();
+    adminPw = $('adPw').value;
     try {
-      await auth.signInWithEmailAndPassword(String(window.ADMIN_EMAIL || ''), $('adPw').value);
-      $('adPw').value = ''; $('adminModal').hidden = true;
-    } catch { $('adminErr').textContent = '비밀번호가 맞지 않아요.'; }
+      await loadAdmin();
+      $('adPw').value = ''; $('adminModal').hidden = true; setAdmin(true);
+    } catch (err) {
+      adminPw = '';
+      $('adminErr').textContent = err.code === 'password' ? '비밀번호가 맞지 않아요.' : err.code === 'rate' ? '시도가 너무 많아요. 10분 뒤에 다시 해 주세요.' : '로그인하지 못했어요. 잠시 후 다시 해 주세요.';
+    }
   });
 
   buildStatic();
